@@ -4,7 +4,7 @@ Prebuilt binaries of the `bberg` DuckDB extension, which adds `read_bberg` and `
 Bloomberg Data License `.out` (getdata/gethistory) and corporate-actions `.cax` (getactions) files with SQL.
 
 This repository contains **only the compiled extension**; the source code is not public.
-Download the files from the [Releases](https://github.com/wdorninger/ddb_bberg-releases/releases) page.
+Current version: **v0.2.0**. Download the files from the [Releases](https://github.com/wdorninger/ddb_bberg-releases/releases) page.
 
 ## Files
 
@@ -15,7 +15,11 @@ Download the files from the [Releases](https://github.com/wdorninger/ddb_bberg-r
 | `bberg.duckdb_extension.wasm` | DuckDB-Wasm (`wasm_eh`, browser / Node) |
 | `SHA256SUMS` | checksums |
 
-Works with **DuckDB ≥ 1.5.6, including 2.0.x** (built on DuckDB's stable C extension API).
+## DuckDB version compatibility
+
+Works with **DuckDB ≥ 1.5.6, including 2.0.x**. The extension is built on DuckDB's stable C extension API (version
+v1.5.6), so the same binary loads into every newer DuckDB release without rebuilding. Remote storage (httpfs/S3),
+secrets and caching come from the DuckDB that loads it.
 
 ## Usage
 
@@ -38,6 +42,17 @@ DuckDB-Wasm: open the database with `allowUnsignedExtensions: true` and
 Wasm build; pass explicit file paths or a list.
 
 Keep the file name starting with `bberg.`: DuckDB derives the extension name from the part before the first dot.
+
+## Documentation
+
+Documentation for v0.2.0:
+
+| Page | Contents |
+|---|---|
+| [docs/bberg.md](docs/bberg.md) | `read_bberg`: `.out` layout, schema, every option, `hist=true`, examples |
+| [docs/bbcax.md](docs/bbcax.md) | `read_bbcax`: `.cax` layout, `action=`, options, examples |
+| [docs/usage.md](docs/usage.md) | Inputs, globs, remote files, replacement scan, types, NULLs, encodings, parallelism, errors |
+| [docs/wasm.md](docs/wasm.md) | Using the DuckDB-Wasm build in a browser or Node |
 
 ## Third-party notices
 
