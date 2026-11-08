@@ -1,6 +1,6 @@
 # Using the bberg readers
 
-*Documentation for `bberg` v0.2.0. [Back to the README](../README.md).*
+*Documentation for `bberg` v0.2.1. [Back to the README](../README.md).*
 
 This page covers the behaviour `read_bberg` and `read_bbcax` share. Format-specific details live in
 [bberg.md](bberg.md) and [bbcax.md](bbcax.md).

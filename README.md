@@ -4,13 +4,15 @@ Prebuilt binaries of the `bberg` DuckDB extension, which adds `read_bberg` and `
 Bloomberg Data License `.out` (getdata/gethistory) and corporate-actions `.cax` (getactions) files with SQL.
 
 This repository contains **only the compiled extension**; the source code is not public.
-Current version: **v0.2.0**. Download the files from the [Releases](https://github.com/wdorninger/ddb_bberg-releases/releases) page.
+Current version: **v0.2.1**. Download the files from the [Releases](https://github.com/wdorninger/ddb_bberg-releases/releases) page.
 
 ## Files
 
 | File | Platform |
 |---|---|
 | `bberg.linux_amd64.duckdb_extension` | Linux x86-64 (glibc ≥ 2.28) |
+| `bberg.osx_arm64.duckdb_extension` | macOS Apple Silicon (macOS ≥ 11) |
+| `bberg.osx_amd64.duckdb_extension` | macOS Intel (macOS ≥ 11) |
 | `bberg.windows_amd64.duckdb_extension` | Windows x86-64 |
 | `bberg.duckdb_extension.wasm` | DuckDB-Wasm (`wasm_eh`, browser / Node) |
 | `SHA256SUMS` | checksums |
@@ -41,11 +43,14 @@ DuckDB-Wasm: open the database with `allowUnsignedExtensions: true` and
 `LOAD 'https://<your host>/bberg.duckdb_extension.wasm'` (served with CORS). Globs are not available in the
 Wasm build; pass explicit file paths or a list.
 
+macOS: a downloaded file is quarantined by Gatekeeper; clear the flag before loading it with
+`xattr -d com.apple.quarantine bberg.osx_arm64.duckdb_extension`.
+
 Keep the file name starting with `bberg.`: DuckDB derives the extension name from the part before the first dot.
 
 ## Documentation
 
-Documentation for v0.2.0:
+Documentation for v0.2.1:
 
 | Page | Contents |
 |---|---|

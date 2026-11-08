@@ -1,6 +1,6 @@
 # DuckDB-Wasm
 
-*Documentation for `bberg` v0.2.0. [Back to the README](../README.md).*
+*Documentation for `bberg` v0.2.1. [Back to the README](../README.md).*
 
 The extension is also built for [DuckDB-Wasm](https://github.com/duckdb/duckdb-wasm), so
 `read_bberg` / `read_bbcax` can run in a browser or in Node.

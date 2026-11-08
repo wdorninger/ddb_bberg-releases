@@ -1,6 +1,6 @@
 # `read_bberg`
 
-*Documentation for `bberg` v0.2.0. [Back to the README](../README.md).*
+*Documentation for `bberg` v0.2.1. [Back to the README](../README.md).*
 
 > Paths such as `test/sql/data/...` in the examples refer to the extension's own test files, which are not published. Use your own files.
 
