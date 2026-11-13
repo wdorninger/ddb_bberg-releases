@@ -1,223 +1,242 @@
-# `read_bberg`
+# read_bberg
 
-*Documentation for `bberg` v0.2.1. [Back to the README](../README.md).*
-
-> Paths such as `test/sql/data/...` in the examples refer to the extension's own test files, which are not published. Use your own files.
-
-## Overview
-
-`read_bberg` reads Bloomberg Data License pipe-delimited `.out` exports (plain text or gzip-compressed), in both
-the per-security layout and the historical (`hist=true`) layout. Behaviour shared with the other readers
-(inputs, remote files, types, NULLs, parallelism) is described in [usage.md](usage.md).
-
-`path` is a file, directory, glob, or a `LIST` of those (`read_bberg(['a.out', 'b/*.out'])`). A bare
-`.out` / `.out.gz` path in `FROM` is read with `read_bberg` automatically (replacement scan):
+*bberg v0.2.1 · [README](../README.md) · [Shared behaviour](usage.md)*
 
 ```sql
-SELECT * FROM 'test/sql/data/year=2026/month=11/sample_bberg.out';
+read_bberg(path [, option := value, ...])
 ```
 
-## Quick start
+Reads Bloomberg Data License request/reply files (`.out`, optionally gzip-compressed) produced by the
+`getdata` and `gethistory` programs. Each data line becomes one row, and each field listed in the file's
+`START-OF-FIELDS` section becomes one column.
 
-```sql
-LOAD '/path/to/bberg.linux_amd64.duckdb_extension';
+`path` is a file, a directory, a glob, or a list of these. Inputs, remote storage, type detection, NULL
+handling and parallelism are shared with `read_bbcax` and are described in [usage.md](usage.md).
 
-SELECT *
-FROM read_bberg('test/sql/data/year=2026/month=11/sample_bberg.out')
-LIMIT 5;
+The examples on this page use the sample files in [`examples/`](../examples/). See the
+[sample data disclaimer](../README.md#sample-data-disclaimer).
+
+## File layout
+
+A reply file has a header of `KEY=VALUE` lines, the list of requested fields and the data section:
+
+```
+START-OF-FILE
+RUNDATE=20260114
+PROGRAMNAME=getdata
+DATEFORMAT=yyyymmdd
+START-OF-FIELDS
+TICKER
+NAME
+PX_LAST
+END-OF-FIELDS
+START-OF-DATA
+QKW US Equity|0|3|QKW|QUACKWORKS INC|184.32|
+PDL US Equity|0|3|PDL|PUDDLE LOGISTICS CORP|47.05|
+END-OF-DATA
+END-OF-FILE
 ```
 
-## `.out` file capabilities
-
-- Reads Bloomberg export sections (`START-OF-FILE`, `START-OF-FIELDS`, `START-OF-DATA`, etc.).
-- Supports plain `.out` and `.out.gz` (gzip is detected by the `.gz` suffix plus the gzip magic bytes; a
-  truncated archive is an error).
-- Reads through DuckDB's own file system, so remote paths (`s3://`, `https://`, `gcs://`, ... with `httpfs`
-  loaded and its secrets/credentials) work like local ones. Remote files are read in 8 MB blocks.
-- Accepts file globs (for example `*.out`, `*.out.gz`, `**/*.out`) and directory inputs. Glob expansion and
-  directory listing work on local paths only (the C extension API has no glob); remote paths must be explicit
-  file paths (or a `LIST` of them). A glob that matches nothing is an error.
-- Recursively scans directories and returns a unified stream.
-- Extracts each file's header key/value pairs into a `PARAMETERS` map column (per file: a row always carries
-  the header of the file it came from).
-- Optionally extracts hive-style partition columns from paths like `year=2026/month=11/...`.
-- Streams data in chunks at execution time (does not fully materialize files before query processing).
-- Scans run in parallel: one thread per file, and large uncompressed files are additionally split into
-  `split_size` byte ranges, one per thread. Row order is then unspecified unless you `ORDER BY` (use
-  `parallel=false` for file order).
-- Only the columns a query uses are parsed (projection pushdown), e.g. `PARAMETERS` costs nothing unless
-  selected.
+Every data line starts with the security, an error code and the number of fields, followed by one value per
+requested field. In `gethistory` files a date follows the field count. Lines that begin with
+`comment_prefix` (default `#`) are skipped.
 
 ## Output schema
 
-`read_bberg` always includes:
+| Column | Type | Description |
+|---|---|---|
+| `PARAMETERS` | `MAP(VARCHAR, VARCHAR)` | Header `KEY=VALUE` pairs of the file the row came from (`RUNDATE`, `PROGRAMNAME`, `DATEFORMAT`, ...) |
+| `SECURITY_DESC` | `VARCHAR` | Security as requested, e.g. `QKW US Equity` |
+| `ERROR_CODE` | `BIGINT` | Bloomberg return code for the security; `0` means success |
+| `NUM_FIELDS` | `BIGINT` | Number of field values on the line |
+| `DTE` | `DATE` | Only with `hist = true`: the observation date |
+| *one column per field* | detected | Named after the field mnemonic, typed by [type detection](usage.md#type-detection) |
+| `filename` | `VARCHAR` | Only with `filename = true` |
+| *partition keys* | `VARCHAR` | Only with `hive_partitioning = true` |
 
-- `PARAMETERS MAP(VARCHAR, VARCHAR)`
-- `SECURITY_DESC VARCHAR`
-- `ERROR_CODE BIGINT`
-- `NUM_FIELDS BIGINT`
-- one column per declared field in the file's `START-OF-FIELDS` section
+`DESCRIBE` shows the resolved schema for a file:
 
-When `hist=true`, `read_bberg` also adds:
+```sql
+DESCRIBE SELECT * FROM read_bberg('examples/prices.out', bloomberg_nulls = true);
+```
 
-- `DTE DATE` (between `NUM_FIELDS` and dynamic field columns)
+| column_name | column_type |
+|---|---|
+| PARAMETERS | MAP(VARCHAR, VARCHAR) |
+| SECURITY_DESC | VARCHAR |
+| ERROR_CODE | BIGINT |
+| NUM_FIELDS | BIGINT |
+| TICKER | VARCHAR |
+| NAME | VARCHAR |
+| CRNCY | VARCHAR |
+| PX_LAST | DOUBLE |
+| PX_VOLUME | BIGINT |
+| EQY_DVD_YLD_IND | DOUBLE |
+| LAST_UPDATE_DT | DATE |
+| ID_CUSIP | VARCHAR |
 
-Optional extra output columns:
+`ID_CUSIP` stays `VARCHAR` because its values have leading zeros. Without `bloomberg_nulls = true`, the
+`N.A.` placeholders in the sample file would make every field column `VARCHAR`.
 
-- `filename VARCHAR` when `filename=true`
-- one `VARCHAR` column per detected hive partition key when `hive_partitioning=true`
+## Options
 
-## `read_bberg` options (all flags)
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `hist` | `BOOLEAN` | `false` | Read the `gethistory` layout. Adds the `DTE` column after `NUM_FIELDS`. |
+| `bloomberg_nulls` | `BOOLEAN` | `false` | Treat Bloomberg's placeholders `N.A.`, `N.S.`, `N.D.`, `N/A`, `#N/A N/A` and `FLD UNKNOWN` as `NULL`. |
+| `nullstr` | `VARCHAR` or `VARCHAR[]` | none | Additional values to read as `NULL`. Compared after trimming. Ignored by type detection. |
+| `empty_as_null` | `BOOLEAN` | `false` | Read empty `VARCHAR` values as `NULL`. |
+| `types` | `STRUCT` | none | Type of individual columns by name, e.g. `{'PX_LAST': 'DECIMAL(18,6)'}`. Other columns keep detection. Case-insensitive; an unknown name is an error. Takes precedence over `all_varchar`. Cannot be combined with `columns`. |
+| `columns` | `STRUCT` | none | Full schema override: every data column (`SECURITY_DESC`, `ERROR_CODE`, `NUM_FIELDS`, `DTE` if `hist`, then all fields), in order, with name and type. A different column count is an error. |
+| `auto_detect` | `BOOLEAN` | `true` | Detect field types from a sample. `false` reads all field columns as `VARCHAR`. |
+| `all_varchar` | `BOOLEAN` | `false` | Read all field columns as `VARCHAR`. The fixed columns keep their types. |
+| `detect_dates` | `BOOLEAN` | `true` | Detect `DATE` and `TIMESTAMP` columns. With `false`, such columns become `BIGINT` or `VARCHAR`. |
+| `bulk_fields` | `BOOLEAN` | `false` | Decode bulk fields into `VARCHAR[][]`. See [Bulk fields](#bulk-fields). |
+| `sample_size` | `BIGINT` | `20480` | Rows sampled for type detection. `0` or less samples all rows. |
+| `union_by_name` | `BOOLEAN` | `false` | Combine files with different field lists. Fields are matched by name, case-insensitively; missing fields are `NULL`. Without it, differing field lists are an error. |
+| `filename` | `BOOLEAN` | `false` | Add a `filename` column. |
+| `hive_partitioning` | `BOOLEAN` | `false` | Add a `VARCHAR` column for each `key=value` directory in the path. |
+| `comment_prefix` | `VARCHAR` | `'#'` | Skip lines starting with this prefix in the fields and data sections. |
+| `encoding` | `VARCHAR` | `'utf-8'` | `'utf-8'` (validated) or `'latin-1'` (aliases `latin1`, `iso-8859-1`). |
+| `ignore_errors` | `BOOLEAN` | `false` | Skip data lines with fewer than three values and lines that are not valid in the chosen encoding. |
+| `parallel` | `BOOLEAN` | `true` | Scan files and byte ranges of large files on several threads. `false` reads on one thread in input order. |
+| `split_size` | `BIGINT` | `16777216` | Byte size of the ranges a large uncompressed file is split into. |
+| `store_rejects` | `BOOLEAN` | `false` | Accepted for compatibility with `read_csv`. `true` is an error; use `ignore_errors`. |
+| `rejects_scan` | `VARCHAR` | none | Accepted for compatibility with `read_csv`. Setting it is an error. |
 
-All options below are accepted by `read_bberg(path, ...)`.
+Supported type names for `types` and `columns` are listed in [usage.md](usage.md#explicit-types).
 
-| Option | Type | Default | Applies to | Behavior |
-|---|---|---|---|---|
-| `auto_detect` | `BOOLEAN` | `true` | `.out`, historical `.out` | Infer dynamic field types from sampled rows; fixed columns keep their fixed types. |
-| `comment_prefix` | `VARCHAR` | `'#'` | `.out`, historical `.out` | Skip lines starting with this prefix in `FIELDS` and `DATA` sections. |
-| `filename` | `BOOLEAN` | `false` | `.out`, historical `.out` | Appends a `filename` output column. |
-| `empty_as_null` | `BOOLEAN` | `false` | `.out`, historical `.out` | Converts empty strings to `NULL`. |
-| `union_by_name` | `BOOLEAN` | `false` | `.out`, historical `.out` | Merge schemas from multiple files into a superset; columns absent in a given file are filled with `NULL`. When `false` (default), all files must declare identical fields or an error is raised. |
-| `columns` | `STRUCT` | unset | `.out`, historical `.out` | Override output names/types. Must list exactly all data columns (`SECURITY_DESC`, `ERROR_CODE`, `NUM_FIELDS`, [`DTE`,] fields) in order, otherwise an error is raised. Supported types: `VARCHAR`, `BOOLEAN`, `TINYINT`, `SMALLINT`, `INTEGER`, `BIGINT`, `FLOAT`, `DOUBLE`, `DECIMAL(p,s)` (exact; `DECIMAL` alone is `DECIMAL(18,3)`), `DATE`, `TIMESTAMP`, `VARCHAR[][]` (bulk field) and their usual aliases. `DATE`/`TIMESTAMP` accept ISO dates and, when the header says `DATEFORMAT=yyyymmdd`, compact `20260114`. |
-| `types` | `STRUCT` | unset | `.out`, historical `.out` | Override the type of individual columns by name, e.g. `types={'PX_LAST': 'DECIMAL(18,6)'}`; all other columns keep detection. Names match the field or output name case-insensitively; an unknown name is an error. Same type names as `columns`. Cannot be combined with `columns`. Wins over `all_varchar`. |
-| `detect_dates` | `BOOLEAN` | `true` | `.out`, historical `.out` | Detect `DATE` / `TIMESTAMP` columns (see Type detection). `false` keeps such columns `BIGINT` / `VARCHAR`. |
-| `bulk_fields` | `BOOLEAN` | `false` | `.out`, historical `.out` | Decode bulk fields (`;2;rows;cols;...`) into `VARCHAR[][]` (see Bulk fields). |
-| `encoding` | `VARCHAR` | `'utf-8'` | `.out`, historical `.out` | `'utf-8'` validates text (invalid UTF-8 is an error, or skipped with `ignore_errors`); `'latin-1'` (`latin1`, `iso-8859-1`) converts ISO-8859-1 files. |
-| `split_size` | `BIGINT` | `16777216` | `.out`, historical `.out` | Byte size of the ranges an uncompressed file larger than this is split into for parallel scanning. |
-| `all_varchar` | `BOOLEAN` | `false` | `.out`, historical `.out` | Forces inferred data columns to `VARCHAR` (except fixed typed columns). |
-| `sample_size` | `BIGINT` | `20480` | `.out`, historical `.out` | Number of rows sampled for type inference. Values `<= 0` mean "sample all available rows" during bind. |
-| `hive_partitioning` | `BOOLEAN` | `false` | `.out`, historical `.out` | Extract path segments `key=value` into output columns (as `VARCHAR`). |
-| `ignore_errors` | `BOOLEAN` | `false` | `.out`, historical `.out` | Skips malformed data rows with fewer than 3 columns and lines that are not valid UTF-8; otherwise query errors out. |
-| `parallel` | `BOOLEAN` | `true` | `.out`, historical `.out` | Scan files, and byte ranges of large uncompressed files, on multiple threads. `false` reads everything on one thread in file order. |
-| `store_rejects` | `BOOLEAN` | `false` | `.out`, historical `.out` | Not supported: `true` is an error (use `ignore_errors`). Accepted for `read_csv` compatibility. |
-| `rejects_scan` | `VARCHAR` | unset | `.out`, historical `.out` | Not supported: setting it is an error. Accepted for `read_csv` compatibility. |
-| `nullstr` | `VARCHAR` or `LIST<VARCHAR>` | unset | `.out`, historical `.out` | Any trimmed value equal to one of these markers is returned as `NULL`, and is ignored by type detection. |
-| `bloomberg_nulls` | `BOOLEAN` | `false` | `.out`, historical `.out` | Adds Bloomberg's "no value" markers to `nullstr`: `N.A.`, `N.S.`, `N.D.`, `N/A`, `#N/A N/A`, `FLD UNKNOWN`. |
-| `hist` | `BOOLEAN` | `false` | historical `.out` | Enables historical layout handling by inserting `DTE DATE` and applying historical date parsing rules. |
+## Historical files
 
-## Type detection
+`gethistory` files carry one line per security and date. Read them with `hist = true`:
 
-Field columns are detected from up to `sample_size` rows: the first type every non-empty, non-`nullstr`
-value fits, in the order `DATE`, `TIMESTAMP`, `BOOLEAN`, `BIGINT`, `DOUBLE`, `VARCHAR` (with
-`bulk_fields=true`, `VARCHAR[][]` first).
+```sql
+SELECT SECURITY_DESC, DTE, PX_OPEN, PX_LAST, PX_VOLUME
+FROM read_bberg('examples/history.out', hist = true)
+ORDER BY SECURITY_DESC, DTE;
+```
 
-- `DATE`: ISO `2026-01-14`, or `20260114` when the file header says `DATEFORMAT=yyyymmdd` (years 1900–2199, so
-  8-digit codes that are not plausible dates stay `BIGINT`). `TIMESTAMP`: ISO date plus time
-  (`2026-01-14 16:30:00`, `2026-01-14T16:30:00Z`); a column mixing dates and timestamps is `TIMESTAMP`.
-  `detect_dates=false` turns this off.
-- Values with leading zeros (`00123456`) keep a column `VARCHAR`, because in Bloomberg exports those are
-  identifiers (CUSIP, SEDOL, ...) whose zeros would otherwise be lost.
-- A Bloomberg null marker such as `N.A.` keeps a column `VARCHAR` unless it is declared with `nullstr` or
-  `bloomberg_nulls=true`.
+| SECURITY_DESC | DTE | PX_OPEN | PX_LAST | PX_VOLUME |
+|---|---|---:|---:|---:|
+| PDL US Equity | 2026-01-12 | 46.2 | 46.71 | 902400 |
+| PDL US Equity | 2026-01-13 | 46.7 | 47.12 | 811700 |
+| PDL US Equity | 2026-01-14 | 47.1 | 47.05 | 880150 |
+| QKW US Equity | 2026-01-12 | 181.1 | 183.2 | 2104300 |
+| QKW US Equity | 2026-01-13 | 183.25 | 185.02 | 2488100 |
+| QKW US Equity | 2026-01-14 | 185.0 | 184.32 | 2315400 |
 
-Number parsing is locale independent. A value that does not parse as the column type is returned as `NULL`.
-Use `types={'col': 'TYPE'}` to fix individual columns.
+`DTE` is parsed using the file's `DATEFORMAT` header (`yyyymmdd` is supported) or as an ISO date. A date that
+cannot be parsed is `NULL`.
 
 ## Bulk fields
 
-Bloomberg encodes multi-row fields (dividend history, holders, advisers, ...) as one value:
-`;2;<rows>;<cols>;` followed by `<type>;<value>;` per cell. With `bulk_fields=true`, a column whose sampled
-values all have that shape is returned as `VARCHAR[][]` (a list of rows, each a list of cell values; the
-per-cell type codes are dropped). Values that do not decode exactly (wrong cell count) are `NULL`. Force the
-decoding for one column with `types={'DVD_HIST': 'VARCHAR[][]'}`.
+Bloomberg encodes multi-row fields, such as dividend history, as a single value: `;2;<rows>;<cols>;`
+followed by a `<type>;<value>;` pair for every cell. With `bulk_fields = true`, a column whose values all have
+this shape is returned as `VARCHAR[][]`: a list of rows, each a list of cell values. Values that do not
+decode are `NULL`. To decode one column regardless of detection, use `types = {'DVD_HIST': 'VARCHAR[][]'}`.
 
 ```sql
-SELECT TICKER, h[1] AS kind, strptime(h[2], '%Y%m%d')::DATE AS ex_date, h[3]::DOUBLE AS amount
-FROM read_bberg('test/sql/data/misc/bulk.out', bulk_fields=true), unnest(DVD_HIST) AS t(h);
+SELECT TICKER,
+       h[1]                             AS dividend_type,
+       strptime(h[2], '%Y%m%d')::DATE   AS ex_date,
+       h[3]::DOUBLE                     AS amount
+FROM read_bberg('examples/dividends.out', bulk_fields = true),
+     unnest(DVD_HIST) AS t(h);
 ```
 
-## Historical `.out` notes (`hist=true`)
+| TICKER | dividend_type | ex_date | amount |
+|---|---|---|---:|
+| QKW | Regular Cash | 2025-11-14 | 0.52 |
+| QKW | Regular Cash | 2025-08-15 | 0.5 |
+| PDL | Special Cash | 2025-12-01 | 1.6 |
 
-- `DTE` is parsed as `DATE`.
-- If the file header contains `DATEFORMAT`, it is used as a format hint for `DTE` parsing.
-- Current explicit format support is `yyyymmdd`.
-- If date parsing fails for a row, `DTE` is returned as `NULL` for that row.
+## Examples
 
-## Common examples
-
-### 1) Single `.out`
+### Successful securities only, with failures listed separately
 
 ```sql
-SELECT *
-FROM read_bberg('test/sql/data/year=2026/month=11/sample_bberg.out')
-LIMIT 5;
+SELECT SECURITY_DESC, ERROR_CODE, NAME, PX_LAST
+FROM read_bberg('examples/prices.out', bloomberg_nulls = true)
+ORDER BY ERROR_CODE DESC, SECURITY_DESC;
 ```
 
-### 2) Single `.out.gz`
+| SECURITY_DESC | ERROR_CODE | NAME | PX_LAST |
+|---|---:|---|---:|
+| XYZQ US Equity | 10 | NULL | NULL |
+| FTHR GY Equity | 0 | FEDERWERK AG | 92.1 |
+| MRSH LN Equity | 0 | MARSHLAND UTILITIES PLC | 1268.5 |
+| PDL US Equity | 0 | PUDDLE LOGISTICS CORP | 47.05 |
+| QKW US Equity | 0 | QUACKWORKS INC | 184.32 |
+| WDDL FP Equity | 0 | WADDLE SA | 15.884 |
+
+### Exact decimals
 
 ```sql
-SELECT *
-FROM read_bberg('test/sql/data/year=2025/month=1/sample_prices.out.gz', empty_as_null=true)
-LIMIT 5;
+SELECT TICKER, PX_LAST
+FROM read_bberg('examples/prices.out', bloomberg_nulls = true,
+                types = {'PX_LAST': 'DECIMAL(18,4)'})
+WHERE ERROR_CODE = 0;
 ```
 
-### 3) Glob patterns for `.out` and `.out.gz`
+### Header values
 
 ```sql
-SELECT count(*)
-FROM read_bberg('test/sql/data/year=2025/month=1/*.out', empty_as_null=true);
-
-SELECT count(*)
-FROM read_bberg('test/sql/data/year=2025/month=1/*.out.gz', empty_as_null=true);
+SELECT DISTINCT PARAMETERS['PROGRAMNAME'] AS program, PARAMETERS['RUNDATE'] AS run_date
+FROM read_bberg('examples/prices.out');
 ```
 
-### 4) Hive partitioning style query
+| program | run_date |
+|---|---|
+| getdata | 20260114 |
+
+### Several files with different field lists
+
+```sql
+SELECT filename, count(*) AS rows
+FROM read_bberg(['examples/prices.out', 'examples/history.out'],
+                union_by_name = true, filename = true)
+GROUP BY filename
+ORDER BY filename;
+```
+
+| filename | rows |
+|---|---:|
+| examples/history.out | 6 |
+| examples/prices.out | 6 |
+
+### Partitioned archive
+
+For a directory tree such as `archive/year=2026/month=01/getdata_20260114.out.gz`:
 
 ```sql
 SELECT year, month, count(*) AS rows
-FROM read_bberg(
-	'test/sql/data/year=*/month=*/*.out.gz',
-	hive_partitioning=true,
-	empty_as_null=true
-)
-GROUP BY year, month
-ORDER BY year, month;
+FROM read_bberg('archive/year=*/month=*/*.out.gz', hive_partitioning = true, bloomberg_nulls = true)
+GROUP BY ALL
+ORDER BY ALL;
 ```
 
-### 5) Hive partition filter pushdown style usage
+### Loading into a table
 
 ```sql
-SELECT *
-FROM read_bberg(
-	'test/sql/data/year=2026/month=*/sample_bberg.out',
-	hive_partitioning=true,
-	filename=true
-)
-WHERE month='11';
+SET preserve_insertion_order = false;   -- allows a parallel load
+CREATE TABLE prices AS
+SELECT * EXCLUDE (PARAMETERS)
+FROM read_bberg('archive/**/*.out.gz', union_by_name = true, bloomberg_nulls = true);
 ```
 
-### 6) Null markers and empty string handling
+### Replacement scan
 
 ```sql
-SELECT *
-FROM read_bberg(
-	'test/sql/data/year=2026/month=11/sample_bberg.out',
-	nullstr=['N/A', '-', 'null'],
-	empty_as_null=true
-)
-LIMIT 10;
+SELECT count(*) FROM 'examples/prices.out';
 ```
 
-### 7) Historical `.out` read
+| count_star() |
+|---:|
+| 6 |
 
-```sql
-SELECT DTE, SECURITY_DESC, * EXCLUDE(PARAMETERS, DTE, SECURITY_DESC)
-FROM read_bberg(
-	'gethistory_prices.out',
-	hist=true
-)
-LIMIT 20;
-```
+## Multiple files
 
-## Multi-file behavior and schema compatibility
-
-When scanning multiple files (glob, directory or list), field declarations from `START-OF-FIELDS` must match
-across files, unless `union_by_name=true`.
-
-If declarations differ, `read_bberg` raises:
-
-`read_bberg encountered mismatched field declarations across files`
-
-With `union_by_name=true` the output has the union of all fields (matched case-insensitively, in any order
-per file); fields a file does not declare are `NULL` for its rows.
-
+All files must declare the same fields in `START-OF-FIELDS`, unless `union_by_name = true`. Otherwise the
+query fails with `read_bberg encountered mismatched field declarations across files`. With
+`union_by_name = true`, the output contains the union of all fields, and fields that a file does not declare
+are `NULL` for its rows.
